@@ -12,7 +12,6 @@ contract BorrowTest is Test {
     MyToken public myToken;
     MockDapiProxy public mockDapiProxy;
     MockETHDapiProxy public mockETHDapiProxy;
-    
 
     address alice = makeAddr("alice");
     address bob = makeAddr("bob");
@@ -33,28 +32,35 @@ contract BorrowTest is Test {
 
         vm.deal(alice, 10000);
         vm.deal(bob, 10000);
+        vm.startPrank(alice);
+        myToken.mint();
+        vm.stopPrank();
+        vm.startPrank(bob);
+        myToken.mint();
+        vm.stopPrank();
     }
 
     function test_Deposit() public {
-       
         vm.startPrank(alice);
-        myToken.mint();
         myToken.approve(address(borrowLend), 1000);
         // address tokenadd = borrowLend.allowedTokens(0);
         // console2.log("Approved Tokens", tokenadd);
         borrowLend.depositToken(address(myToken), 1000);
-        borrowLend.depositNative{value: 1}();
         assertEq(borrowLend.deposits(alice, address(myToken)), 1000);
-
+        borrowLend.depositNative{value: 1}();
+        assertEq(borrowLend.nativeDeposits(alice), 1);
         vm.stopPrank();
         // console2.log("deposits: ", borrowLend.getTotalContractBalance());
         vm.startPrank(bob);
-        myToken.mint();
-        // vm.expectRevert();
-        // borrowLend.borrow(500);
+        vm.expectRevert();
+        borrowLend.depositToken(address(myToken), 0);
+        vm.expectRevert();
+        borrowLend.depositNative{value: 0}();
         vm.stopPrank();
-
-        console2.log("alice collateral:", borrowLend.userCollateralValue(alice));
+        // (uint256 borrowedAmount, uint256 depositedAmount) = borrowLend.userInformation(alice);
+        // console2.log("depositedAmount: ", depositedAmount);
+        // console2.log("borrowedAmount: ", borrowedAmount);
+        assertEq(borrowLend.healthFactor(alice), 100e8);
     }
 
     // function testFuzz_Deposit(uint8 x) public {
@@ -65,15 +71,33 @@ contract BorrowTest is Test {
     // }
 
     function test_Borrow() public {
+        //fund the contract with asset
+        myToken.approve(address(borrowLend), 1000);
+        borrowLend.depositToken(address(myToken), 1000);
+
         vm.startPrank(alice);
-        myToken.mint();
-        // borrowLend.depositETH{value: 1000}();
+        myToken.approve(address(borrowLend), 1000);
+        borrowLend.depositToken(address(myToken), 1000);
+        assertEq(borrowLend.deposits(alice, address(myToken)), 1000);
+
+        borrowLend.borrow(address(myToken), 313);
+        assertEq(borrowLend.borrows(alice, address(myToken)), 313);
+        // console2.log("Alice Health Factor: ", borrowLend.healthFactor(alice));
+        borrowLend.borrow(address(myToken), 387);
+        // console2.log("Alice Health Factor: ", borrowLend.healthFactor(alice));
+        assertEq(borrowLend.borrows(alice, address(myToken)), 700);
+        vm.expectRevert();
+        borrowLend.borrow(address(myToken), 1);
+        borrowLend.depositNative{value: 1}();
+        // console2.log("Alice Health Factor: ", borrowLend.healthFactor(alice));
+        borrowLend.borrow(address(myToken), 1300);
+        vm.expectRevert();
+        borrowLend.borrow(address(myToken), 1);
         vm.stopPrank();
         // Try to borrow with no deposit
         vm.startPrank(bob);
-        myToken.mint();
-        // vm.expectRevert();
-        // borrowLend.borrow(500);
+        vm.expectRevert();
+        borrowLend.borrow(address(myToken),500);
         vm.stopPrank();
         // Try to borrow more than 70% of deposit
         vm.startPrank(alice);

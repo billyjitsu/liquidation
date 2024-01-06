@@ -4,7 +4,7 @@ pragma solidity ^0.8.23;
 /*
  Fun little borrow lend by @billyjitsu
 
- health factor = (total deposits - total borrows) / total deposits
+
     health factor = 1e8 = 100% = 1
 
  health factor = (collateral value * liquidation Threshold%) / borrows
@@ -29,7 +29,6 @@ contract BorrowLend is Ownable {
     mapping(address => uint256) public nativeDeposits;
     mapping(address => mapping(address => uint256)) public deposits;
     mapping(address => mapping(address => uint256)) public borrows;
-    // mapping(address => address) public tokenToPriceFeed;
 
     address public nativeTokenProxyAddress;
 
@@ -40,8 +39,8 @@ contract BorrowLend is Ownable {
 
     event DepositedNativeAsset(address indexed account, uint256 indexed amount);
     event DepositedToken(address indexed account, address indexed token, uint256 indexed amount);
+    event Borrow(address indexed account, address indexed token, uint256 indexed amount);
     event AllowedTokenSet(address indexed token, address indexed priceFeed);
-
 
     constructor() Ownable(msg.sender) {}
 
@@ -63,6 +62,7 @@ contract BorrowLend is Ownable {
 
     // Chain native asset
     function depositNative() external payable {
+        if (msg.value == 0) revert zeroAmount();
         nativeDeposits[msg.sender] += msg.value;
         emit DepositedNativeAsset(msg.sender, msg.value);
     }
@@ -75,23 +75,21 @@ contract BorrowLend is Ownable {
         emit DepositedToken(msg.sender, _token, _amount);
     }
 
-    // function borrow(uint256 _amount) external {
-    //     // Calculate the maximum amount that can still be borrowed
-    //     uint256 alreadyBorrowed = borrows[msg.sender];
-    //     uint256 maxBorrowAmount = (deposits[msg.sender] * 70 / 100) - alreadyBorrowed;
-
-    //     if (address(this).balance < _amount) {
-    //         revert ContractUnderFunded({available: address(this).balance, required: _amount});
-    //     }
-
-    //     if (_amount > maxBorrowAmount) {
-    //         revert ExceedsMaximumBorrowLimit({maxAllowed: maxBorrowAmount, requested: _amount});
-    //     }
-    //     //update balance before transfer
-    //     borrows[msg.sender] += _amount;
-    //     (bool success,) = msg.sender.call{value: _amount}("");
-    //     require(success, "Transfer failed.");
-    // }
+    function borrow(address _token, uint256 _amount) external {
+        // Calculate the maximum amount that can still be borrowed
+        if (_amount > IERC20(_token).balanceOf(address(this))) {
+            revert ContractUnderFunded({available: address(this).balance, required: _amount});
+        }
+        //update balance before transfer
+        borrows[msg.sender][_token] += _amount;
+        bool success = IERC20(_token).transfer(msg.sender, _amount);
+        if (!success) revert TransferFailed();
+        emit Borrow(msg.sender, _token, _amount);
+        // check the health factor after borrow
+        if (healthFactor(msg.sender) < MIN_HEALH_FACTOR) {
+            revert OverLeveraged({maxAllowed: MIN_HEALH_FACTOR, requested: healthFactor(msg.sender)});
+        }
+    }
 
     // function repay() external payable {
     //     // Don't allow overpayment
@@ -122,35 +120,49 @@ contract BorrowLend is Ownable {
     //     require(success, "Transfer failed.");
     // }
 
-    // function calculateMaxWithdrawalAmount(address _user) public view returns (uint256) {
-    //     uint256 currentDeposit = deposits[_user];
-    //     uint256 currentBorrow = borrows[_user];
+    function healthFactor(address _user) public view returns (uint256) {
+       (uint256 totalBorrowValue, uint256 totalDepositValue) = userInformation(_user);
+       uint256 userCollateral = (totalDepositValue * LIQUIDATION_THRESHOLD) / 100;
+       if (totalBorrowValue == 0) {return 100e8;}
+       return (userCollateral * 1e8) / totalBorrowValue;
+    }
 
-    //     // Calculate the minimum deposit required to keep the borrow amount within 70% of the deposit
-    //     uint256 requiredDepositAfterWithdraw = currentBorrow * 100 / 70;
+    function userInformation(address _user) public view returns (uint256, uint256) {
+        uint256 totalDepositValue = calculateDepositValue(_user);
+        uint256 totalBorrowValue = calculateBorrowValue(_user);
+        return (totalBorrowValue, totalDepositValue);
+    }
 
-    //     // Calculate the maximum amount that can be withdrawn
-    //     uint256 maxWithdrawalAmount =
-    //         currentDeposit > requiredDepositAfterWithdraw ? currentDeposit - requiredDepositAfterWithdraw : 0;
-
-    //     return maxWithdrawalAmount;
-    // }
-
-    // function userDepositedValue(address _user) public view returns (uint256) {
-    //     uint256 ethPrice;
-    //     uint256 ethTimestamp;
-    //     (ethPrice, ethTimestamp) = readDataFeed(ethProxyAddress);
-    //     uint256 usdcPrice;
-    //     uint256 usdcTimestamp;
-    //     (usdcPrice, usdcTimestamp) = readDataFeed(usdcProxyAddress);
-    //     uint256 ethValue = deposits[_user] * ethPrice;
-    //     uint256 usdcValue = deposits[_user] * usdcPrice;
-    //     return ethValue + usdcValue;
-    // }
-
-    function userCollateralValue(address _user) view public returns (uint256) {
+    function calculateDepositValue(address _user) public view returns (uint256) {
         uint256 totalDepositValue = 0;
-        if(nativeDeposits[_user] > 0) {
+        if (nativeDeposits[_user] > 0) {
+            totalDepositValue += calculateNativeAssetUSDValue(nativeDeposits[_user]);
+        }
+        for (uint256 i = 0; i < allowedTokens.length; ++i) {
+            address token = allowedTokens[i];
+            uint256 depositedTokenAmount = deposits[_user][token];
+            if (depositedTokenAmount > 0) {
+                totalDepositValue += calculateUSDValue(token, depositedTokenAmount);
+            }
+        }
+        return totalDepositValue;
+    }
+
+    function calculateBorrowValue(address _user) public view returns (uint256) {
+        uint256 totalBorrowValue = 0;
+        for (uint256 i = 0; i < allowedTokens.length; ++i) {
+            address token = allowedTokens[i];
+            uint256 borrowedTokenAmount = borrows[_user][token];
+            if (borrowedTokenAmount > 0) {
+                totalBorrowValue += calculateUSDValue(token, borrowedTokenAmount);
+            }
+        }
+        return totalBorrowValue;
+    }
+
+    function userCollateralValue(address _user) public view returns (uint256) {
+        uint256 totalDepositValue = 0;
+        if (nativeDeposits[_user] > 0) {
             totalDepositValue += calculateNativeAssetUSDValue(nativeDeposits[_user]);
         }
         for (uint256 i = 0; i < allowedTokens.length; ++i) {
@@ -165,19 +177,17 @@ contract BorrowLend is Ownable {
 
     function calculateUSDValue(address _token, uint256 _amount) public view returns (uint256) {
         uint256 price;
-      //  uint256 timestamp;
-        (price, ) = readDataFeed(priceFeedOfToken[_token]);
+        //  uint256 timestamp;
+        (price,) = readDataFeed(priceFeedOfToken[_token]);
         return (_amount * price) / 1e18;
     }
 
     function calculateNativeAssetUSDValue(uint256 _amount) public view returns (uint256) {
         uint256 price;
         // uint256 ethTimestamp;
-        (price, ) = readDataFeed(nativeTokenProxyAddress);
+        (price,) = readDataFeed(nativeTokenProxyAddress);
         return (_amount * price) / 1e18;
     }
-
-
 
     // view total amount of ETH in contract for testing
     function getTotalContractBalance() public view returns (uint256) {
