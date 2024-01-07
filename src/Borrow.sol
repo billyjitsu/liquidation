@@ -149,7 +149,6 @@ contract BorrowLend is Ownable {
         uint256 totalRewardAmountInRewardToken = calculateNativeAssetValueFromUSD(rewardAmountInUSD + halfDebtInUSD);
         console2.log("Total Reward Amount in Reward Token: ", totalRewardAmountInRewardToken);
         if (totalRewardAmountInRewardToken == 0) revert NoRewardForLiquidation({rewardAmount: rewardAmountInUSD, halfDebtInUSD: halfDebtInUSD});
-        console2.log("made it past liquidation calculation");
         repayFunction(_account, _tokenToRepay, halfDebt);
         bool success = payable(msg.sender).send(totalRewardAmountInRewardToken);
         if (!success) revert TransferFailed();
