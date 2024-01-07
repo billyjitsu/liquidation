@@ -30,8 +30,8 @@ contract BorrowTest is Test {
         borrowLend.setNativeTokenProxyAddress(address(mockETHDapiProxy));
         borrowLend.setTokensAvailable(address(myToken), address(mockDapiProxy));
 
-        vm.deal(alice, 10000);
-        vm.deal(bob, 10000);
+        vm.deal(alice, 10000 ether);
+        vm.deal(bob, 10000 ether);
         vm.startPrank(alice);
         myToken.mint();
         vm.stopPrank();
@@ -97,17 +97,7 @@ contract BorrowTest is Test {
         // Try to borrow with no deposit
         vm.startPrank(bob);
         vm.expectRevert();
-        borrowLend.borrow(address(myToken),500);
-        vm.stopPrank();
-        // Try to borrow more than 70% of deposit
-        vm.startPrank(alice);
-        // vm.expectRevert();
-        // borrowLend.borrow(800);
-        // Try to borrow 70% of deposit
-        // borrowLend.borrow(700);
-        // Try to borrow just a little more
-        // vm.expectRevert();
-        // borrowLend.borrow(1);
+        borrowLend.borrow(address(myToken), 500);
         vm.stopPrank();
         // console2.log("deposits: ", borrowLend.getTotalContractBalance());
         // console2.log("deposits: ", borrowLend.deposits(alice));
@@ -115,75 +105,93 @@ contract BorrowTest is Test {
     }
 
     function test_Repay() public {
+        //fund the contract with asset
+        myToken.approve(address(borrowLend), 1000);
+        borrowLend.depositToken(address(myToken), 1000);
+
         vm.startPrank(alice);
-        // borrowLend.deposit{value: 1000}();
-        // Borrow 70% of deposit
-        // borrowLend.borrow(700);
+        myToken.approve(address(borrowLend), 1000);
+        borrowLend.depositToken(address(myToken), 1000);
+        borrowLend.borrow(address(myToken), 700);
+        myToken.approve(address(borrowLend), 500);
+        borrowLend.repay(address(myToken), 500);
+        assertEq(borrowLend.borrows(alice, address(myToken)), 200);
+        vm.expectRevert();
+        borrowLend.borrow(address(myToken), 501);
+        borrowLend.borrow(address(myToken), 500);
+        assertEq(borrowLend.borrows(alice, address(myToken)), 700);
 
-        // Try to repay more than borrowed
-        // vm.expectRevert();
-        // borrowLend.repay{value: 701}();
-        // Repay less than borrowed
-        // borrowLend.repay{value: 50}();
-        // assertEq(borrowLend.borrows(alice), 650);
+        borrowLend.depositNative{value: 1}();
+        borrowLend.borrow(address(myToken), 1300);
+        myToken.approve(address(borrowLend), 2000);
+        borrowLend.repay(address(myToken), 2000);
 
-        // Try to borrow more than 70% of deposit
-        // vm.expectRevert();
-        // borrowLend.borrow(51);
-        // Repay borrowed amount
-        // borrowLend.repay{value: 650}();
-        // console2.log("deposits: ", borrowLend.deposits(alice));
-        // console2.log("borrows: ", borrowLend.borrows(alice));
-
-        // Deposit more to borrow even more
-        // borrowLend.deposit{value: 1000}();
-        // borrowLend.borrow(1400);
-        // try to borrow over
-        // vm.expectRevert();
-        // borrowLend.borrow(1);
-
-        // Repay borrowed amount
-        // borrowLend.repay{value: 1400}();
-
+        vm.expectRevert();
+        borrowLend.repay(address(myToken), 5);
+        // console2.log("Allice Borrow Balance: ", borrowLend.borrows(alice, address(myToken)));
+        borrowLend.borrow(address(myToken), 100);
         vm.stopPrank();
-        // console2.log("deposits: ", borrowLend.deposits(alice));
-        // console2.log("borrows: ", borrowLend.borrows(alice));
+        // Try to repay with no borrow
+        vm.startPrank(bob);
+        myToken.approve(address(borrowLend), 500);
+        vm.expectRevert();
+        borrowLend.borrow(address(myToken), 500);
+        vm.stopPrank();
     }
 
     function test_Withdraw() public {
-        vm.startPrank(alice);
-        // borrowLend.deposit{value: 1000}();
-        vm.stopPrank();
+        //fund the contract with asset
+        myToken.approve(address(borrowLend), 1000);
+        borrowLend.depositToken(address(myToken), 1000);
 
-        // Try to withdraw with no deposit
+        vm.startPrank(alice);
+        myToken.approve(address(borrowLend), 1000);
+        borrowLend.depositToken(address(myToken), 1000);
+        borrowLend.borrow(address(myToken), 700);
+        vm.expectRevert();
+        borrowLend.withdraw(address(myToken), 1);
+        myToken.approve(address(borrowLend), 500);
+        borrowLend.repay(address(myToken), 500);
+        borrowLend.withdraw(address(myToken), 500);
+        // console2.log("Alice Health Factor: ", borrowLend.healthFactor(alice));
+        borrowLend.depositNative{value: 1}();
+        borrowLend.withdraw(address(myToken), 500);
+        vm.expectRevert();
+        borrowLend.withdraw(address(myToken), 1);
+        myToken.approve(address(borrowLend), 200);
+        borrowLend.repay(address(myToken), 200);
+        vm.expectRevert();
+        borrowLend.withdraw(address(myToken), 200);
+        borrowLend.withdrawNative(1);
+        vm.expectRevert();
+        borrowLend.withdrawNative(1);
+        vm.stopPrank();
+        // Try to repay with no borrow
         vm.startPrank(bob);
-        // vm.expectRevert();
-        // borrowLend.withdraw(100);
+        vm.expectRevert();
+        borrowLend.withdraw(address(myToken), 500);
+        vm.expectRevert();
+        borrowLend.withdrawNative(1);
         vm.stopPrank();
+    }
+
+    function test_Liquidate() public {
+        //fund the contract with asset
+        myToken.approve(address(borrowLend), 10000);
+        borrowLend.depositToken(address(myToken), 10000);
 
         vm.startPrank(alice);
-        // Borrow 70% of deposit
-        // borrowLend.borrow(500);
-        // uint256 maxWithdraw = borrowLend.calculateMaxWithdrawalAmount(alice);
-        // console2.log("maxWithdraw: ", maxWithdraw);
-
-        // Try to withdraw more than 70% of deposit
-        // vm.expectRevert();
-        // borrowLend.withdraw(maxWithdraw + 1);
-        // Withdraw 70% of deposit
-        // borrowLend.withdraw(maxWithdraw);
-
-        // Repay borrowed amount
-        // borrowLend.repay{value: 500}();
-
-        // maxWithdraw = borrowLend.calculateMaxWithdrawalAmount(alice);
-        // console2.log("maxWithdraw: ", maxWithdraw);
-
-        // console2.log("deposits: ", borrowLend.deposits(alice));
-        // console2.log("borrows: ", borrowLend.borrows(alice));
-
-        // Withdraw balance with no borrow
-        // borrowLend.withdraw(maxWithdraw);
+        borrowLend.depositNative{value: 2}();
+        borrowLend.borrow(address(myToken), 2800);
+        vm.stopPrank();
+        console2.log("Alice Health Factor: ", borrowLend.healthFactor(alice));
+        // Update Oracle Feed 
+        mockETHDapiProxy.setDapiValues(1900000000000000000000, 1001);
+        console2.log("Health Factor", borrowLend.healthFactor(alice));
+        // Liquidate
+        vm.startPrank(bob);
+        myToken.approve(address(borrowLend), 10000);
+        borrowLend.liquidateForNative(alice, address(myToken));
         vm.stopPrank();
     }
 }
