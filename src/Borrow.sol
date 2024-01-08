@@ -4,25 +4,22 @@ pragma solidity ^0.8.23;
 /*
  Fun little borrow lend by @billyjitsu
 
-
-    health factor = 1e8 = 100% = 1
-
+ health factor = 1e8 = 100% = 1
  health factor = (collateral value * liquidation Threshold%) / borrows
 */
-// import "@openzeppelin/contracts/token/ERC20/extensions/ERC20Burnable.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@api3/contracts/v0.8/interfaces/IProxy.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {console2} from "forge-std/Test.sol";
 
+error zeroAmount();
+error TransferFailed();
+error TokenNotAllowed(address token);
 error InsufficientBalance(uint256 available, uint256 required);
 error ExceedsMaximumBorrowLimit(uint256 maxAllowed, uint256 requested);
 error Overpayment(uint256 available, uint256 requested);
 error ContractUnderFunded(uint256 available, uint256 required);
 error OverLeveraged(uint256 maxAllowed, uint256 requested);
-error TokenNotAllowed(address token);
-error TransferFailed();
-error zeroAmount();
 error NotLiquidatable(uint256 healthFactor, uint256 minHealthFactor);
 error IncorrectRepaymentToken(address token);
 error NoRewardForLiquidation(uint256 rewardAmount, uint256 halfDebtInUSD);
@@ -57,6 +54,7 @@ contract BorrowLend is Ownable {
         _;
     }
 
+    // Set Native Price Feed as it has no address
     function setNativeTokenProxyAddress(address _nativeTokenProxyAddress) external onlyOwner {
         nativeTokenProxyAddress = _nativeTokenProxyAddress;
     }
@@ -75,6 +73,7 @@ contract BorrowLend is Ownable {
         emit DepositedNativeAsset(msg.sender, msg.value);
     }
 
+    // Deposit Token
     function depositToken(address _token, uint256 _amount) external isAllowedToken(_token) {
         if (_amount == 0) revert zeroAmount();
         bool success = IERC20(_token).transferFrom(msg.sender, address(this), _amount);
@@ -83,6 +82,7 @@ contract BorrowLend is Ownable {
         emit DepositedToken(msg.sender, _token, _amount);
     }
 
+    // Borrow against deposit
     function borrow(address _token, uint256 _amount) external {
         // Calculate the maximum amount that can still be borrowed
         if (_amount > IERC20(_token).balanceOf(address(this))) {
@@ -99,6 +99,7 @@ contract BorrowLend is Ownable {
         }
     }
 
+    // Pay back debt
     function repay(address _token, uint256 _amount) external payable {
         if (_amount == 0) revert zeroAmount();
         repayFunction(msg.sender, _token, _amount);
@@ -118,55 +119,50 @@ contract BorrowLend is Ownable {
         borrows[_account][_token] -= _amount;
     }
 
+    // Liquidate for Token as a deposit
     function liquidate(address _account, address _tokenToRepay, address _rewardToken) external payable {
         if (healthFactor(_account) >= MIN_HEALH_FACTOR) {
             revert NotLiquidatable({healthFactor: healthFactor(_account), minHealthFactor: MIN_HEALH_FACTOR});
         }
         uint256 halfDebt = borrows[_account][_tokenToRepay] / 2;
         uint256 halfDebtInUSD = calculateUSDValue(_tokenToRepay, halfDebt);
+        console2.log("Half Debt in USD: ", halfDebtInUSD/1e18);
         if (halfDebtInUSD == 0) revert IncorrectRepaymentToken(_tokenToRepay);
         uint256 rewardAmountInUSD = (halfDebtInUSD * LIQUIDATION_REWARD) / 100;
-        uint256 totalRewardAmountInRewardToken = calculateUSDValue(_rewardToken, rewardAmountInUSD + halfDebtInUSD);
+        console2.log("Reward Amount in USD: ", rewardAmountInUSD/1e18);
+        uint256 totalRewardAmountInRewardToken = calculateTokenValueFromUSD(_rewardToken, rewardAmountInUSD + halfDebtInUSD);
         if (totalRewardAmountInRewardToken == 0) revert NoRewardForLiquidation({rewardAmount: rewardAmountInUSD, halfDebtInUSD: halfDebtInUSD});
-        // (uint256 halfDebt, uint256 halfDebtInUSD, uint256 totalRewardAmountInRewardToken) = liquidationCalculation(_account, _tokenToRepay, _rewardToken);
+        console2.log("Total Reward Amount in Reward Token: ", totalRewardAmountInRewardToken/1e18);
         repayFunction(_account, _tokenToRepay, halfDebt);
-        bool success = IERC20(_rewardToken).transferFrom(msg.sender, _account, totalRewardAmountInRewardToken);
+        deposits[_account][_rewardToken] -= totalRewardAmountInRewardToken;
+        bool success = IERC20(_rewardToken).transfer(msg.sender, totalRewardAmountInRewardToken);
         if (!success) revert TransferFailed();
         emit Liquidate(_account, _tokenToRepay, _rewardToken, halfDebtInUSD, msg.sender);
     }
 
+    // Liquidate for Native Asset as a deposit
     function liquidateForNative(address _account, address _tokenToRepay) external {
         if (healthFactor(_account) >= MIN_HEALH_FACTOR) {
             revert NotLiquidatable({healthFactor: healthFactor(_account), minHealthFactor: MIN_HEALH_FACTOR});
         }
         uint256 halfDebt = borrows[_account][_tokenToRepay] / 2;
-        console2.log("Half Debt: ", halfDebt);
+        console2.log("Half Debt: ", halfDebt/1e18);
         uint256 halfDebtInUSD = calculateUSDValue(_tokenToRepay, halfDebt);
-        console2.log("Half Debt in USD: ", halfDebtInUSD);
+        console2.log("Half Debt in USD: ", halfDebtInUSD/1e18);
         if (halfDebtInUSD == 0) revert IncorrectRepaymentToken(_tokenToRepay);
         uint256 rewardAmountInUSD = (halfDebtInUSD * LIQUIDATION_REWARD) / 100;
-        console2.log("Reward Amount in USD: ", rewardAmountInUSD);
+        console2.log("Reward Amount in USD: ", rewardAmountInUSD/1e18);
         uint256 totalRewardAmountInRewardToken = calculateNativeAssetValueFromUSD(rewardAmountInUSD + halfDebtInUSD);
-        console2.log("Total Reward Amount in Reward Token: ", totalRewardAmountInRewardToken);
+        console2.log("Total Reward Amount in Reward Token in wei: ", totalRewardAmountInRewardToken);
         if (totalRewardAmountInRewardToken == 0) revert NoRewardForLiquidation({rewardAmount: rewardAmountInUSD, halfDebtInUSD: halfDebtInUSD});
         repayFunction(_account, _tokenToRepay, halfDebt);
+        nativeDeposits[_account] -= totalRewardAmountInRewardToken;
         bool success = payable(msg.sender).send(totalRewardAmountInRewardToken);
         if (!success) revert TransferFailed();
         emit LiquidateForNative(_account, _tokenToRepay, halfDebtInUSD, msg.sender);
     }
 
-    // function liquidationCalculation(address _account, address _tokenToRepay, address _rewardToken) internal view returns (uint256, uint256, uint256) {
-    //     uint256 halfDebt = borrows[_account][_tokenToRepay] / 2;
-    //     uint256 halfDebtInUSD = calculateUSDValue(_tokenToRepay, halfDebt);
-    //     if (halfDebtInUSD == 0) revert IncorrectRepaymentToken(_tokenToRepay);
-    //     console2.log("made it past halfDebtInUSD");
-    //     uint256 rewardAmountInUSD = (halfDebtInUSD * LIQUIDATION_REWARD) / 100;
-    //     uint256 totalRewardAmountInRewardToken = calculateUSDValue(_rewardToken, rewardAmountInUSD + halfDebtInUSD);
-    //     console2.log("made it past totalRewardAmountInRewardToken");
-    //     if (totalRewardAmountInRewardToken == 0) revert NoRewardForLiquidation({rewardAmount: rewardAmountInUSD, halfDebtInUSD: halfDebtInUSD});
-    //     return (halfDebt, halfDebtInUSD, totalRewardAmountInRewardToken);
-    // }
-
+    // Withdraw Token
     function withdraw(address _token, uint256 _amount) external {
         if (_amount == 0) revert zeroAmount();
         if (_amount > deposits[msg.sender][_token]) {
@@ -182,6 +178,7 @@ contract BorrowLend is Ownable {
         emit Withdraw(msg.sender, _token, _amount);
     }
 
+    // Withdraw Native Asset
     function withdrawNative(uint256 _amount) external {
         if (_amount == 0) revert zeroAmount();
         if (_amount > nativeDeposits[msg.sender]) {
@@ -197,6 +194,7 @@ contract BorrowLend is Ownable {
         emit WithdrawNative(msg.sender, _amount);
     }
 
+    // Calculate Health Value
     function healthFactor(address _user) public view returns (uint256) {
         (uint256 totalBorrowValue, uint256 totalDepositValue) = userInformation(_user);
         uint256 userCollateral = (totalDepositValue * LIQUIDATION_THRESHOLD) / 100;
@@ -210,6 +208,7 @@ contract BorrowLend is Ownable {
         return (totalBorrowValue, totalDepositValue);
     }
 
+    // Go through all tokens to see deposits and calculate USD value
     function calculateDepositValue(address _user) public view returns (uint256) {
         uint256 totalDepositValue = 0;
         if (nativeDeposits[_user] > 0) {
@@ -225,6 +224,7 @@ contract BorrowLend is Ownable {
         return totalDepositValue;
     }
 
+    // Go through all tokens to see borrows and calculate USD value
     function calculateBorrowValue(address _user) public view returns (uint256) {
         uint256 totalBorrowValue = 0;
         for (uint256 i = 0; i < allowedTokens.length; ++i) {
@@ -237,21 +237,7 @@ contract BorrowLend is Ownable {
         return totalBorrowValue;
     }
 
-    function userCollateralValue(address _user) public view returns (uint256) {
-        uint256 totalDepositValue = 0;
-        if (nativeDeposits[_user] > 0) {
-            totalDepositValue += calculateNativeAssetUSDValue(nativeDeposits[_user]);
-        }
-        for (uint256 i = 0; i < allowedTokens.length; ++i) {
-            address token = allowedTokens[i];
-            uint256 depositedTokenAmount = deposits[_user][token];
-            if (depositedTokenAmount > 0) {
-                totalDepositValue += calculateUSDValue(token, depositedTokenAmount);
-            }
-        }
-        return totalDepositValue;
-    }
-
+    // Get USD Value from Token Amount
     function calculateUSDValue(address _token, uint256 _amount) public view returns (uint256) {
         uint256 price;
         //  uint256 timestamp;
@@ -259,6 +245,7 @@ contract BorrowLend is Ownable {
         return (_amount * price) / 1e18;
     }
 
+    // Get Token Amount from Native Asset Value
     function calculateNativeAssetUSDValue(uint256 _amount) public view returns (uint256) {
         uint256 price;
         // uint256 ethTimestamp;
@@ -266,6 +253,7 @@ contract BorrowLend is Ownable {
         return (_amount * price) / 1e18;
     }
 
+    // Get Token Amount from USD Value
     function calculateTokenValueFromUSD(address _token, uint256 _amount) public view returns (uint256) {
         uint256 price;
         // uint256 timestamp;
@@ -273,6 +261,7 @@ contract BorrowLend is Ownable {
         return (_amount * 1e18) / price;
     }
 
+    // Get Native Token Amount from USD Value
     function calculateNativeAssetValueFromUSD(uint256 _amount) public view returns (uint256) {
         uint256 price;
         // uint256 timestamp;
@@ -285,6 +274,7 @@ contract BorrowLend is Ownable {
         return address(this).balance;
     }
 
+    //Set allowed tokens and their price feed
     function setTokensAvailable(address _token, address _priceFeed) external onlyOwner {
         bool exists = false;
         uint256 allowedTokensLength = allowedTokens.length;

@@ -3,8 +3,8 @@ pragma solidity ^0.8.13;
 
 import {Test, console2} from "forge-std/Test.sol";
 import {BorrowLend} from "../src/Borrow.sol";
-import {MyToken} from "../src/Token.sol";
-import {WETH} from "../src/WETH.sol";
+import {MyToken} from "../src/Tokens/Token.sol";
+import {WETH} from "../src/Tokens/WETH.sol";
 import {MockDapiProxy} from "../src/Mocks/MockDapi.sol";
 import {MockETHDapiProxy} from "../src/Mocks/MockETHDapi.sol";
 import {MockWETHDapiProxy} from "../src/Mocks/MockWETHDapi.sol";
@@ -75,12 +75,12 @@ contract BorrowTest is Test {
         assertEq(borrowLend.healthFactor(alice), 100e8);
     }
 
-    // function testFuzz_Deposit(uint8 x) public {
-    //     vm.startPrank(msg.sender);
-    //     // borrowLend.depositETH{value: x}();
-    //     // assertEq(borrowLend.deposits(msg.sender), x);
-    //     vm.stopPrank();
-    // }
+    // // function testFuzz_Deposit(uint8 x) public {
+    // //     vm.startPrank(msg.sender);
+    // //     // borrowLend.depositETH{value: x}();
+    // //     // assertEq(borrowLend.deposits(msg.sender), x);
+    // //     vm.stopPrank();
+    // // }
 
     function test_Borrow() public {
         //fund the contract with asset
@@ -195,6 +195,8 @@ contract BorrowTest is Test {
         vm.startPrank(alice);
         borrowLend.depositNative{value: 2 ether}();
         borrowLend.borrow(address(myToken), 2800 ether);
+        console2.log("Alice Deposit Balance: ", (borrowLend.nativeDeposits(alice))/1 ether);
+        console2.log("Alice Borrow Balance: ", (borrowLend.borrows(alice, address(myToken)))/1 ether);
         vm.stopPrank();
         vm.startPrank(bob);
         vm.expectRevert();
@@ -213,6 +215,9 @@ contract BorrowTest is Test {
         // console2.log("Bob Balance: ", address(bob).balance);
         vm.stopPrank();
         // check balances of alic after liquidation
+        console2.log("Alice Deposit Balance in Wei: ", (borrowLend.nativeDeposits(alice)));
+        console2.log("Alice Borrow Balance in Wei: ", (borrowLend.borrows(alice, address(myToken))));
+        console2.log("Alice Health Factor: ", borrowLend.healthFactor(alice));
     }
 
     function test_LiquidateTokens() public {
@@ -223,24 +228,27 @@ contract BorrowTest is Test {
         vm.startPrank(alice);
         myToken.approve(address(borrowLend), 4000 ether);
         borrowLend.depositToken(address(myToken), 4000 ether);
-        borrowLend.borrow(address(weth), 2800 ether);
+        borrowLend.borrow(address(weth), 1.4 ether);
         vm.stopPrank();
         vm.startPrank(bob);
         vm.expectRevert();
         borrowLend.liquidateForNative(alice, address(myToken));
         vm.stopPrank();
-        // console2.log("Alice Health Factor: ", borrowLend.healthFactor(alice));
+        console2.log("Alice Health Factor:", borrowLend.healthFactor(alice));
         // Update Oracle Feed 
-        // mockETHDapiProxy.setDapiValues(1900000000000000000000, 1001);
-        // console2.log("Health Factor", borrowLend.healthFactor(alice));
+        mockWETHDapiProxy.setDapiValues(2100000000000000000000, 1001);
+        console2.log("Alice Health Factor:", borrowLend.healthFactor(alice));
         // Liquidate
-        // vm.startPrank(bob);
-        // //Ethereum Balance of Bob
-        // // console2.log("Bob Balance: ", address(bob).balance);
-        // myToken.approve(address(borrowLend), 10000 ether);
-        // borrowLend.liquidateForNative(alice, address(myToken));
-        // // console2.log("Bob Balance: ", address(bob).balance);
-        // vm.stopPrank();
-        // // check balances of alic after liquidation
+        vm.startPrank(bob);
+        //Stable Balance of Bob
+        console2.log("Bob Balance USDC: ", (myToken.balanceOf(address(bob))/1 ether));
+        weth.approve(address(borrowLend), .7 ether);
+        borrowLend.liquidate(alice,address(weth), address(myToken));
+        console2.log("Bob Balance after: ", myToken.balanceOf(address(bob)));
+        vm.stopPrank();
+        // check balances of alic after liquidation
+        console2.log("Alice Deposit Balance in Wei: ", (borrowLend.deposits(alice, address(myToken))));
+        console2.log("Alice Borrow Balance in Wei: ", (borrowLend.borrows(alice, address(weth))));
+        console2.log("Alice Health Factor: ", borrowLend.healthFactor(alice));
     }
 }
