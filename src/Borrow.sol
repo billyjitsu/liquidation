@@ -26,16 +26,22 @@ error NoRewardForLiquidation(uint256 rewardAmount, uint256 halfDebtInUSD);
 
 contract BorrowLend is Ownable {
     address[] public allowedTokens;
-    mapping(address => address) public priceFeedOfToken;
-    mapping(address => uint256) public nativeDeposits;
-    mapping(address => mapping(address => uint256)) public deposits;
-    mapping(address => mapping(address => uint256)) public borrows;
-
     address public nativeTokenProxyAddress;
+    address public rewardToken;
 
     uint256 public constant LIQUIDATION_REWARD = 5;
     uint256 public constant LIQUIDATION_THRESHOLD = 70;
     uint256 public constant MIN_HEALH_FACTOR = 1e8;
+    uint256 public stakingAPR = 5;
+    uint256 public borrowingAPR = 5;
+
+    mapping(address => address) public priceFeedOfToken;
+    mapping(address => uint256) public nativeDeposits;
+    mapping(address => mapping(address => uint256)) public deposits;
+    mapping(address => mapping(address => uint256)) public borrows;
+    mapping(address => mapping(address => uint256)) public interestRates; // look into this
+    mapping(address => uint256) public lastUpdateTimestamp;
+    mapping(address => uint256) public rewards;
 
     event DepositedNativeAsset(address indexed account, uint256 indexed amount);
     event DepositedToken(address indexed account, address indexed token, uint256 indexed amount);
@@ -43,9 +49,19 @@ contract BorrowLend is Ownable {
     event Repay(address indexed account, address indexed token, uint256 indexed amount);
     event Withdraw(address indexed account, address indexed token, uint256 indexed amount);
     event WithdrawNative(address indexed account, uint256 indexed amount);
-    event Liquidate(address indexed account, address indexed repayToken, address indexed rewardToken, uint256 halfDebtInEth, address liquidator);
-    event LiquidateForNative(address indexed account, address indexed repayToken, uint256 halfDebtInEth, address liquidator);
+    event Liquidate(
+        address indexed account,
+        address indexed repayToken,
+        address indexed rewardToken,
+        uint256 halfDebtInEth,
+        address liquidator
+    );
+    event LiquidateForNative(
+        address indexed account, address indexed repayToken, uint256 halfDebtInEth, address liquidator
+    );
     event AllowedTokenSet(address indexed token, address indexed priceFeed);
+    event DepositedRewardToken(address indexed account, address indexed token, uint256 indexed amount);
+    event RewardClaimed(address indexed account, address indexed token, uint256 indexed amount);
 
     constructor() Ownable(msg.sender) {}
 
@@ -70,6 +86,7 @@ contract BorrowLend is Ownable {
     function depositNative() external payable {
         if (msg.value == 0) revert zeroAmount();
         nativeDeposits[msg.sender] += msg.value;
+        updateRewardNative(msg.sender);
         emit DepositedNativeAsset(msg.sender, msg.value);
     }
 
@@ -79,6 +96,7 @@ contract BorrowLend is Ownable {
         bool success = IERC20(_token).transferFrom(msg.sender, address(this), _amount);
         if (!success) revert TransferFailed();
         deposits[msg.sender][_token] += _amount;
+        updateReward(msg.sender, _token);
         emit DepositedToken(msg.sender, _token, _amount);
     }
 
@@ -90,6 +108,7 @@ contract BorrowLend is Ownable {
         }
         //update balance before transfer
         borrows[msg.sender][_token] += _amount;
+        updateReward(msg.sender, _token);
         bool success = IERC20(_token).transfer(msg.sender, _amount);
         if (!success) revert TransferFailed();
         emit Borrow(msg.sender, _token, _amount);
@@ -117,6 +136,7 @@ contract BorrowLend is Ownable {
         if (!success) revert TransferFailed();
         //Update debt balance after transfer
         borrows[_account][_token] -= _amount;
+        updateReward(_account, _token);
     }
 
     // Liquidate for Token as a deposit
@@ -126,13 +146,16 @@ contract BorrowLend is Ownable {
         }
         uint256 halfDebt = borrows[_account][_tokenToRepay] / 2;
         uint256 halfDebtInUSD = calculateUSDValue(_tokenToRepay, halfDebt);
-        console2.log("Half Debt in USD: ", halfDebtInUSD/1e18);
+        console2.log("Half Debt in USD: ", halfDebtInUSD / 1e18);
         if (halfDebtInUSD == 0) revert IncorrectRepaymentToken(_tokenToRepay);
         uint256 rewardAmountInUSD = (halfDebtInUSD * LIQUIDATION_REWARD) / 100;
-        console2.log("Reward Amount in USD: ", rewardAmountInUSD/1e18);
-        uint256 totalRewardAmountInRewardToken = calculateTokenValueFromUSD(_rewardToken, rewardAmountInUSD + halfDebtInUSD);
-        if (totalRewardAmountInRewardToken == 0) revert NoRewardForLiquidation({rewardAmount: rewardAmountInUSD, halfDebtInUSD: halfDebtInUSD});
-        console2.log("Total Reward Amount in Reward Token: ", totalRewardAmountInRewardToken/1e18);
+        console2.log("Reward Amount in USD: ", rewardAmountInUSD / 1e18);
+        uint256 totalRewardAmountInRewardToken =
+            calculateTokenValueFromUSD(_rewardToken, rewardAmountInUSD + halfDebtInUSD);
+        if (totalRewardAmountInRewardToken == 0) {
+            revert NoRewardForLiquidation({rewardAmount: rewardAmountInUSD, halfDebtInUSD: halfDebtInUSD});
+        }
+        console2.log("Total Reward Amount in Reward Token: ", totalRewardAmountInRewardToken / 1e18);
         repayFunction(_account, _tokenToRepay, halfDebt);
         deposits[_account][_rewardToken] -= totalRewardAmountInRewardToken;
         bool success = IERC20(_rewardToken).transfer(msg.sender, totalRewardAmountInRewardToken);
@@ -146,15 +169,17 @@ contract BorrowLend is Ownable {
             revert NotLiquidatable({healthFactor: healthFactor(_account), minHealthFactor: MIN_HEALH_FACTOR});
         }
         uint256 halfDebt = borrows[_account][_tokenToRepay] / 2;
-        console2.log("Half Debt: ", halfDebt/1e18);
+        console2.log("Half Debt: ", halfDebt / 1e18);
         uint256 halfDebtInUSD = calculateUSDValue(_tokenToRepay, halfDebt);
-        console2.log("Half Debt in USD: ", halfDebtInUSD/1e18);
+        console2.log("Half Debt in USD: ", halfDebtInUSD / 1e18);
         if (halfDebtInUSD == 0) revert IncorrectRepaymentToken(_tokenToRepay);
         uint256 rewardAmountInUSD = (halfDebtInUSD * LIQUIDATION_REWARD) / 100;
-        console2.log("Reward Amount in USD: ", rewardAmountInUSD/1e18);
+        console2.log("Reward Amount in USD: ", rewardAmountInUSD / 1e18);
         uint256 totalRewardAmountInRewardToken = calculateNativeAssetValueFromUSD(rewardAmountInUSD + halfDebtInUSD);
         console2.log("Total Reward Amount in Reward Token in wei: ", totalRewardAmountInRewardToken);
-        if (totalRewardAmountInRewardToken == 0) revert NoRewardForLiquidation({rewardAmount: rewardAmountInUSD, halfDebtInUSD: halfDebtInUSD});
+        if (totalRewardAmountInRewardToken == 0) {
+            revert NoRewardForLiquidation({rewardAmount: rewardAmountInUSD, halfDebtInUSD: halfDebtInUSD});
+        }
         repayFunction(_account, _tokenToRepay, halfDebt);
         nativeDeposits[_account] -= totalRewardAmountInRewardToken;
         bool success = payable(msg.sender).send(totalRewardAmountInRewardToken);
@@ -170,6 +195,7 @@ contract BorrowLend is Ownable {
         }
         //update balance before transfer
         deposits[msg.sender][_token] -= _amount;
+        updateReward(msg.sender, _token);
         bool success = IERC20(_token).transfer(msg.sender, _amount);
         if (!success) revert TransferFailed();
         if (healthFactor(msg.sender) < MIN_HEALH_FACTOR) {
@@ -186,12 +212,56 @@ contract BorrowLend is Ownable {
         }
         //update balance before transfer
         nativeDeposits[msg.sender] -= _amount;
+        updateRewardNative(msg.sender);
         bool success = payable(msg.sender).send(_amount);
         if (!success) revert TransferFailed();
         if (healthFactor(msg.sender) < MIN_HEALH_FACTOR) {
             revert OverLeveraged({maxAllowed: MIN_HEALH_FACTOR, requested: healthFactor(msg.sender)});
         }
         emit WithdrawNative(msg.sender, _amount);
+    }
+
+    function updateReward(address _user, address _token) internal {
+        uint256 stakedAmount = deposits[_user][_token];
+        uint256 borrowedAmount = borrows[_user][_token];
+        if (lastUpdateTimestamp[_user] != 0) {
+            uint256 timeElapsed = block.timestamp - lastUpdateTimestamp[_user];
+
+            if (stakedAmount > 0) {
+                rewards[_user] += stakedAmount * stakingAPR / 100 * timeElapsed / 365 days;
+            }
+            if (borrowedAmount > 0) {
+                rewards[_user] += borrowedAmount * borrowingAPR / 100 * timeElapsed / 365 days;
+            }
+            console2.log("Update Rewards Value: ", rewards[_user]);
+        }
+
+        lastUpdateTimestamp[_user] = block.timestamp;
+    }
+
+    function updateRewardNative(address _user) internal {
+        uint256 stakedNativeAmount = nativeDeposits[_user];
+        if (lastUpdateTimestamp[_user] != 0) {
+            uint256 timeElapsed = block.timestamp - lastUpdateTimestamp[_user];
+            // Calculate rewards (assuming APR is compounded annually)
+            if (stakedNativeAmount > 0) {
+                rewards[_user] += stakedNativeAmount * stakingAPR / 100 * timeElapsed / 365 days;
+            }
+            console2.log("Update Rewards Value: ", rewards[_user]);
+        }
+        lastUpdateTimestamp[_user] = block.timestamp;
+    }
+
+    // Function to set the reward token
+    function setRewardToken(address _rewardToken) external onlyOwner {
+        rewardToken = _rewardToken;
+    }
+
+    function depositRewardToken(address _token, uint256 _amount) external {
+        if (_amount == 0) revert zeroAmount();
+        bool success = IERC20(_token).transferFrom(msg.sender, address(this), _amount);
+        if (!success) revert TransferFailed();
+        emit DepositedRewardToken(msg.sender, _token, _amount);
     }
 
     // Calculate Health Value
@@ -267,6 +337,45 @@ contract BorrowLend is Ownable {
         // uint256 timestamp;
         (price,) = readDataFeed(nativeTokenProxyAddress);
         return (_amount * 1e18) / price;
+    }
+
+    function getCurrentReward(address _user) public view returns (uint256) {
+        uint256 totalDeposited = 0;
+        uint256 totalBorrowed = 0;
+
+        uint256 currentReward = rewards[_user];
+        if (lastUpdateTimestamp[_user] != 0) {
+            uint256 timeElapsed = block.timestamp - lastUpdateTimestamp[_user];
+            console2.log("Time Elapsed: ", timeElapsed);
+            // Sum up all deposits across allowed tokens
+            for (uint256 i = 0; i < allowedTokens.length; i++) {
+                address token = allowedTokens[i];
+                totalDeposited += deposits[_user][token];
+                totalBorrowed += borrows[_user][token];
+            }
+
+            // Add native deposits if applicable
+            totalDeposited += nativeDeposits[_user];
+
+            // Calculate additional rewards based on the time elapsed
+            if (totalDeposited > 0) {
+                currentReward += totalDeposited * stakingAPR / 100 * timeElapsed / 365 days;
+            }
+            if (totalBorrowed > 0) {
+                currentReward += totalBorrowed * borrowingAPR / 100 * timeElapsed / 365 days;
+            }
+        }
+        return currentReward;
+    }
+
+    function claimRewards() external {
+        uint256 currentReward = getCurrentReward(msg.sender);
+        if (currentReward == 0) revert zeroAmount();
+        rewards[msg.sender] = 0;
+        lastUpdateTimestamp[msg.sender] = block.timestamp;
+        bool success = IERC20(rewardToken).transfer(msg.sender, currentReward);
+        if (!success) revert TransferFailed();
+        emit RewardClaimed(msg.sender, rewardToken, currentReward);
     }
 
     // view total amount of ETH in contract for testing

@@ -5,18 +5,22 @@ import {Test, console2} from "forge-std/Test.sol";
 import {BorrowLend} from "../src/Borrow.sol";
 import {MyToken} from "../src/Tokens/Token.sol";
 import {WETH} from "../src/Tokens/WETH.sol";
+import {Reward} from "../src/Tokens/Reward.sol";
 import {MockDapiProxy} from "../src/Mocks/MockDapi.sol";
 import {MockETHDapiProxy} from "../src/Mocks/MockETHDapi.sol";
 import {MockWETHDapiProxy} from "../src/Mocks/MockWETHDapi.sol";
+import {MockRewardProxy} from "../src/Mocks/MockRewardDapi.sol";
 
 contract BorrowTest is Test {
     BorrowLend public borrowLend;
     MyToken public myToken;
     WETH public weth;
+    Reward public reward;
 
     MockDapiProxy public mockDapiProxy;
     MockETHDapiProxy public mockETHDapiProxy;
     MockWETHDapiProxy public mockWETHDapiProxy;
+    MockRewardProxy public mockRewardProxy;
 
     address alice = makeAddr("alice");
     address bob = makeAddr("bob");
@@ -25,9 +29,11 @@ contract BorrowTest is Test {
         borrowLend = new BorrowLend();
         myToken = new MyToken();
         weth = new WETH();
+        reward = new Reward();
         mockDapiProxy = new MockDapiProxy();
         mockETHDapiProxy = new MockETHDapiProxy();
         mockWETHDapiProxy = new MockWETHDapiProxy();
+        mockRewardProxy = new MockRewardProxy();
 
         // Set token to 1 dollar
         mockDapiProxy.setDapiValues(1000000000000000000, 1000);
@@ -35,6 +41,8 @@ contract BorrowTest is Test {
         mockETHDapiProxy.setDapiValues(2000000000000000000000, 1000);
         // Set WETH to 2000 dollars
         mockWETHDapiProxy.setDapiValues(2000000000000000000000, 1000);
+        // // Set Reward to 1 dollar
+        // mockRewardProxy.setDapiValues(1000000000000000000, 1000);
 
         borrowLend.setNativeTokenProxyAddress(address(mockETHDapiProxy));
         borrowLend.setTokensAvailable(address(myToken), address(mockDapiProxy));
@@ -50,6 +58,8 @@ contract BorrowTest is Test {
         myToken.mint();
         weth.mint();
         vm.stopPrank();
+
+        reward.mint();
     }
 
     function test_Deposit() public {
@@ -195,15 +205,15 @@ contract BorrowTest is Test {
         vm.startPrank(alice);
         borrowLend.depositNative{value: 2 ether}();
         borrowLend.borrow(address(myToken), 2800 ether);
-        console2.log("Alice Deposit Balance: ", (borrowLend.nativeDeposits(alice))/1 ether);
-        console2.log("Alice Borrow Balance: ", (borrowLend.borrows(alice, address(myToken)))/1 ether);
+        console2.log("Alice Deposit Balance: ", (borrowLend.nativeDeposits(alice)) / 1 ether);
+        console2.log("Alice Borrow Balance: ", (borrowLend.borrows(alice, address(myToken))) / 1 ether);
         vm.stopPrank();
         vm.startPrank(bob);
         vm.expectRevert();
         borrowLend.liquidateForNative(alice, address(myToken));
         vm.stopPrank();
         // console2.log("Alice Health Factor: ", borrowLend.healthFactor(alice));
-        // Update Oracle Feed 
+        // Update Oracle Feed
         mockETHDapiProxy.setDapiValues(1900000000000000000000, 1001);
         // console2.log("Health Factor", borrowLend.healthFactor(alice));
         // Liquidate
@@ -235,20 +245,52 @@ contract BorrowTest is Test {
         borrowLend.liquidateForNative(alice, address(myToken));
         vm.stopPrank();
         console2.log("Alice Health Factor:", borrowLend.healthFactor(alice));
-        // Update Oracle Feed 
+        // Update Oracle Feed
         mockWETHDapiProxy.setDapiValues(2100000000000000000000, 1001);
         console2.log("Alice Health Factor:", borrowLend.healthFactor(alice));
         // Liquidate
         vm.startPrank(bob);
         //Stable Balance of Bob
-        console2.log("Bob Balance USDC: ", (myToken.balanceOf(address(bob))/1 ether));
-        weth.approve(address(borrowLend), .7 ether);
-        borrowLend.liquidate(alice,address(weth), address(myToken));
+        console2.log("Bob Balance USDC: ", (myToken.balanceOf(address(bob)) / 1 ether));
+        weth.approve(address(borrowLend), 0.7 ether);
+        borrowLend.liquidate(alice, address(weth), address(myToken));
         console2.log("Bob Balance after: ", myToken.balanceOf(address(bob)));
         vm.stopPrank();
         // check balances of alic after liquidation
         console2.log("Alice Deposit Balance in Wei: ", (borrowLend.deposits(alice, address(myToken))));
         console2.log("Alice Borrow Balance in Wei: ", (borrowLend.borrows(alice, address(weth))));
         console2.log("Alice Health Factor: ", borrowLend.healthFactor(alice));
+    }
+
+    function test_RewardsDeposit() public {
+        //fund the contract with asset
+        myToken.approve(address(borrowLend), 10000 ether);
+        borrowLend.depositToken(address(myToken), 10000 ether);
+
+        borrowLend.setRewardToken(address(reward));
+
+        //fund the contract with the reward token
+        reward.approve(address(borrowLend), 10000 ether);
+        borrowLend.depositRewardToken(address(reward), 10000 ether);
+        vm.warp(31556926);
+
+        vm.startPrank(alice);
+        borrowLend.depositNative{value: 2 ether}();
+        vm.stopPrank();
+        console2.log("Get Alice's Initial Reward: ", (borrowLend.getCurrentReward(alice)));
+        // console2.log("Current time stamp: ", block.timestamp);
+        vm.warp(block.timestamp + 31556926);
+        // console2.log("New time stamp: ", block.timestamp);
+        console2.log("Get Alice's After 1 year Reward: ", (borrowLend.getCurrentReward(alice)));
+        vm.startPrank(alice);
+        borrowLend.claimRewards();
+        console2.log("Get Alice's After Claim Reward: ", (borrowLend.getCurrentReward(alice)));
+
+        //approve tokens to borrowLend
+        myToken.approve(address(borrowLend), 10000 ether);
+        borrowLend.depositToken(address(myToken), 10000 ether);
+        console2.log("Get Alice's Redeposit Reward: ", (borrowLend.getCurrentReward(alice)));
+        vm.warp(block.timestamp + 100000);
+        console2.log("Get Alice's Latest Reward: ", (borrowLend.getCurrentReward(alice)));
     }
 }
