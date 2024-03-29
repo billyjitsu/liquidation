@@ -1,6 +1,7 @@
 ## Borrow Lending Contract
 
 **This contract will allow users to deposit allowed tokens or native chain asset (Mainnet ETH) backed by [API3](https://market.api3.org/dapis) oracles.**
+A very simplified version to understand the flow of how borrow / lending works
 
 Primary Functions:
 
